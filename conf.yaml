@@ -1,0 +1,4 @@
+LIBRARY: 
+  /mnt/seq/minion/albacore_test/lib1
+PARAMS:
+  CHEMISTRY: FLO-MIN106_LSK208_2d.cfg
