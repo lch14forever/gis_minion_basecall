@@ -1,0 +1,179 @@
+# shell environment used for each job
+# note, this is a naked shell, not aware of your bashrc!
+shell.executable("/bin/bash")
+# unofficial bash strict mode
+shell.prefix("set -euo pipefail;")# don't forget trailing semicolon
+
+import os
+import glob
+import re
+
+##assert 'LIBRARY' in config
+##assert 'PARAMS' in config
+
+########### tools & data: ########
+## Default tools
+##FILTER         = srcdir('filter_fail.pl')
+SCAFFOLD_STATS = srcdir('scaffold_stats_opt.pl')
+CONTIG_SIZE    = srcdir('compute_contig_size.pl')
+HISTOGRAM      = srcdir('histogram.R')
+FASTQ2FASTA    = srcdir('fastq2fasta.pl')
+
+lib = config['LIBRARY']
+if not 'PREFIX' in config:
+    lib_basename = os.path.basename(lib.strip('/'))
+else:
+    lib_basename = config['PREFIX']
+
+
+if (not 'KIT' in config) and (not 'FLOWCELL' in config):
+    sys.stderr.write("Warning: No chemistry specified -- using default (R9.5 1d2)\n")
+    KIT = 'SQK-LSK308'
+    FLOWCELL = 'FLO-MIN107'
+else:
+    assert('KIT' in config and 'FLOWCELL' in config)
+    KIT = config['KIT']
+    FLOWCELL = config['FLOWCELL']
+    
+ALBACORE = 'full_1dsq_basecaller.py'
+
+    
+chunks = [os.path.basename(f) for f in glob.glob(lib + '/[0-9]*')]
+chunks = [ i for i in chunks if i.isdigit() ]
+
+assert len(chunks) >0
+#################################
+
+
+# def get_dir_for_prefix(wildcards):
+#         return config['SAMPLES'][wildcards.prefix]
+
+rule final:
+    input:
+        lib_basename + "_basecalled_fast5.tar.gz",
+        lib_basename+".1d2.fasta.gz",
+        lib_basename+".1d2.fastq.gz",
+        lib_basename+".sequencing_summary.1d.txt.gz",
+        lib_basename+".sequencing_summary.1d2.txt.gz",
+        lib_basename+".pipeline.1d.log.gz",
+        lib_basename+".pipeline.1d2.log.gz",
+        lib_basename+".configuration.1d.cfg.gz",
+        lib_basename+".configuration.1d2.cfg.gz"
+        
+rule base_call:
+    input:  lib+"/{folder}"
+    output:
+        "{folder}.basecalled", "{folder}.basecalled/1dsq_analysis"
+    threads: 12
+    params: resource="h_rt=48:00:00,mem_free=20G "
+    shell:
+        """
+        set +u
+        source activate nanopore_py3
+        set -u
+        {ALBACORE} -i {input} -t {threads} -s {output}  -f {FLOWCELL} -k {KIT} -n 0 -o fast5 -q 10000000
+        source deactivate
+        """
+
+rule merge_log:
+    input:
+        folder      =expand("{folder}.basecalled", folder=chunks),
+        folder_1d2  =expand("{folder}.basecalled/1dsq_analysis", folder=chunks)
+    output:
+        log_1d      =lib_basename+".pipeline.1d.log.gz",
+        log_1d2     =lib_basename+".pipeline.1d2.log.gz"
+    threads: 1
+    params: resource="h_rt=48:00:00,mem_free=3G -q ionode.q "
+    shell:
+        "find {input.folder} -name 'pipeline.log' -maxdepth 1 -exec cat {{}} \; | gzip - > {output.log_1d}; "
+        "find {input.folder_1d2} -name 'pipeline.log' -maxdepth 1 -exec cat {{}} \; | gzip - > {output.log_1d2}; "
+
+rule merge_config:
+    input:
+        folder      ="0.basecalled",
+        folder_1d2  ="0.basecalled/1dsq_analysis"
+    output:
+        config_1d    =lib_basename+".configuration.1d.cfg.gz",
+        config_1d2   =lib_basename+".configuration.1d2.cfg.gz"
+    threads: 1
+    params: resource="h_rt=48:00:00,mem_free=3G -q ionode.q "
+    shell:
+        "gzip -c 0.basecalled/configuration.cfg  > {output.config_1d}; "
+        "gzip -c 0.basecalled/1dsq_analysis/configuration.cfg  > {output.config_1d2}; "
+
+
+rule merge_summary:
+    input:
+        folder      =expand("{folder}.basecalled", folder=chunks),
+        folder_1d2  =expand("{folder}.basecalled/1dsq_analysis", folder=chunks)
+    output:
+        summary_1d   =lib_basename+".sequencing_summary.1d.txt.gz",
+        summary_1d2   =lib_basename+".sequencing_summary.1d2.txt.gz"
+    threads: 1
+    params: resource="h_rt=48:00:00,mem_free=3G -q ionode.q "
+    shell: ## This is a bit annoying...
+        "find {input.folder} -name 'sequencing_summary.txt' -maxdepth 1 -exec cat {{}} \; | grep -v '^filename'|cat <(head -n1 0.basecalled/sequencing_summary.txt) - | gzip - > {output.summary_1d}; "
+        "find {input.folder_1d2} -name 'sequencing_1dsq_summary.txt' -maxdepth 1 -exec cat {{}} \; | grep -v '^filename'|cat <(head -n1 0.basecalled/1dsq_analysis/sequencing_1dsq_summary.txt) - | gzip - > {output.summary_1d2}; "
+
+
+rule merge_fastq:
+    input:
+        expand("{folder}.basecalled/1dsq_analysis", folder=chunks)
+    output:
+        lib_basename+".1d2.fastq.gz"
+    threads: 1
+    params: resource="h_rt=48:00:00,mem_free=3G -q ionode.q "
+    shell:
+        "find {input} -name '*fastq' -exec cat {{}} \; | gzip - > {output}"
+
+rule fastq2fasta:
+    input:
+        expand("{folder}.basecalled/1dsq_analysis", folder=chunks)
+    output:
+        lib_basename+".1d2.fasta"
+    threads: 1
+    params: resource="h_rt=48:00:00,mem_free=3G -q ionode.q "
+    shell:
+        "find {input} -name '*fastq'  -exec cat {{}} \; |  {FASTQ2FASTA} - > {output}"
+    
+
+rule qc_analysis:
+    input:
+        lib_basename+".1d2.fasta"  
+    output:
+        stats   =lib_basename+".stats",
+        size    =lib_basename+".size",
+        plot    =lib_basename+".hist.pdf"
+    threads: 1
+    params: resource="h_rt=48:00:00,mem_free=5G"
+    shell:
+        "perl {SCAFFOLD_STATS} {input} 1 1 > {output.stats}; "
+        "perl {CONTIG_SIZE} {input} > {output.size}; "
+        "max=`grep Max {output.stats} | uniq | awk '{{print $NF}}'`; "
+        "Rscript {HISTOGRAM} "
+        "  {output.size}  " + lib_basename + "_Nanopore " 
+        "  {output.plot} "
+        "  $max "
+        "  1 "
+        "  $max ; "
+
+rule compress:
+    input:
+        folder    =expand("{folder}.basecalled", folder=chunks),
+        folder_1d2=expand("{folder}.basecalled/1dsq_analysis", folder=chunks),
+        size      =lib_basename+".stats", 
+        stats     =lib_basename+".size",
+        fasta     =lib_basename+".1d2.fasta"
+        #prefilter =lib+"/"+lib_basename+".prefilter.fasta.gz",
+    output:
+        basecalled = lib_basename + "_basecalled_fast5.tar.gz",
+        merged_fasta = lib_basename+".1d2.fasta.gz"
+
+    threads: 1
+    params: resource="h_rt=48:00:00,mem_free=5G -q ionode.q"
+    shell:
+        ##"mkdir -p "+lib_basename+".basecalled.fast5/ ; find {input.folder} -name '*fast5' -exec mv -t "+lib_basename+".basecalled.fast5/ {{}} +;"
+        "gzip {input.fasta} {input.size} {input.stats}; "
+        "find {input.folder} -type f -maxdepth 1 -exec rm -f {{}} \;; "
+        "rm -rf {input.folder_1d2}; "
+        "tar -czf {output.basecalled} {input.folder} --remove-files; "
