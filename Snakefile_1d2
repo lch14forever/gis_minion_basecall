@@ -63,7 +63,8 @@ rule final:
 rule base_call:
     input:  lib+"/{folder}"
     output:
-        "{folder}.basecalled", "{folder}.basecalled/1dsq_analysis"
+        folder     ="{folder}.basecalled",
+        folder_1d2 ="{folder}.basecalled/1dsq_analysis"
     threads: 12
     params: resource="h_rt=48:00:00,mem_free=20G "
     shell:
@@ -71,7 +72,7 @@ rule base_call:
         set +u
         source activate nanopore_py3
         set -u
-        {ALBACORE} -i {input} -t {threads} -s {output}  -f {FLOWCELL} -k {KIT} -n 0 -o fast5 -q 10000000
+        {ALBACORE} -i {input} -t {threads} -s {output.folder}  -f {FLOWCELL} -k {KIT} -n 0 -o fast5 -q 10000000
         source deactivate
         """
 
