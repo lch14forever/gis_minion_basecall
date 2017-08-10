@@ -53,6 +53,7 @@ rule final:
         lib_basename + "_basecalled_fast5.tar.gz",
         lib_basename+".1d2.fasta.gz",
         lib_basename+".1d2.fastq.gz",
+        lib_basename+".1d.fastq.gz",
         lib_basename+".sequencing_summary.1d.txt.gz",
         lib_basename+".sequencing_summary.1d2.txt.gz",
         lib_basename+".pipeline.1d.log.gz",
@@ -75,7 +76,23 @@ rule base_call:
         {ALBACORE} -i {input} -t {threads} -s {output.folder}  -f {FLOWCELL} -k {KIT} -n 0 -o fast5 -q 10000000
         source deactivate
         """
-
+        
+rule poretools:
+    input:
+        folder ="{folder}.basecalled",
+    output:
+        fastq = "{folder}.basecalled/sequences.1d.fastq"
+    threads: 1
+    params: resource="h_rt=48:00:00,mem_free=3G -q ionode.q "
+    shell:
+        """
+        set +u
+        source activate nanopore
+        set -u
+        poretools fastq --type all {input.folder}/workspace/*fast5 > {output.fastq}
+        source deactivate
+        """
+        
 rule merge_log:
     input:
         folder      =expand("{folder}.basecalled", folder=chunks),
@@ -116,7 +133,6 @@ rule merge_summary:
         "find {input.folder} -name 'sequencing_summary.txt' -maxdepth 1 -exec cat {{}} \; | grep -v '^filename'|cat <(head -n1 0.basecalled/sequencing_summary.txt) - | gzip - > {output.summary_1d}; "
         "find {input.folder_1d2} -name 'sequencing_1dsq_summary.txt' -maxdepth 1 -exec cat {{}} \; | grep -v '^filename'|cat <(head -n1 0.basecalled/1dsq_analysis/sequencing_1dsq_summary.txt) - | gzip - > {output.summary_1d2}; "
 
-
 rule merge_fastq:
     input:
         expand("{folder}.basecalled/1dsq_analysis", folder=chunks)
@@ -136,8 +152,17 @@ rule fastq2fasta:
     params: resource="h_rt=48:00:00,mem_free=3G -q ionode.q "
     shell:
         "find {input} -name '*fastq'  -exec cat {{}} \; |  {FASTQ2FASTA} - > {output}"
-    
 
+rule merge_fastq_1d:
+    input:
+        expand("{folder}.basecalled/sequences.1d.fastq", folder=chunks)
+    output:
+        lib_basename+".1d.fastq.gz"
+    threads: 1
+    params: resource="h_rt=48:00:00,mem_free=3G -q ionode.q "
+    shell:
+        "cat {input} | gzip - > {output}"
+                
 rule qc_analysis:
     input:
         lib_basename+".1d2.fasta"  
@@ -173,7 +198,6 @@ rule compress:
     threads: 1
     params: resource="h_rt=48:00:00,mem_free=5G -q ionode.q"
     shell:
-        ##"mkdir -p "+lib_basename+".basecalled.fast5/ ; find {input.folder} -name '*fast5' -exec mv -t "+lib_basename+".basecalled.fast5/ {{}} +;"
         "gzip {input.fasta} {input.size} {input.stats}; "
         "find {input.folder} -type f -maxdepth 1 -exec rm -f {{}} \;; "
         "rm -rf {input.folder_1d2}; "
